@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>🚀 Echo Booster V5</h1>
+  <h1>🚀 Echo Booster V1</h1>
   <p><b>Advanced Windows & Gaming Optimizer</b></p>
   <p><i>Developed by Dev RULE</i></p>
 </div>
@@ -21,7 +21,7 @@
 
 ### Option 1: Download the Executable (Recommended)
 1. Go to the Releases tab on this GitHub repository.
-2. Download the latest `G0DBoost_V5.exe`.
+2. Download the latest `G0DBoost_V1.exe`.
 3. Run the application (it will request Administrator privileges to apply system tweaks).
 
 ### Option 2: Run from Source
