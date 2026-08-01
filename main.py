@@ -865,8 +865,8 @@ class EchoBoosterApp(ctk.CTk):
     def _apply_update(self, latest):
         self.log(f"  \u2934\uFE0F Update found ({latest}). Downloading silently...")
         try:
-            # Assuming GitHub release direct download URL
-            exe_url = "https://github.com/RULE94DEV/EchoBooster/raw/main/EchoBooster.exe"
+            # Use GitHub Releases latest download URL
+            exe_url = "https://github.com/RULE94DEV/EchoBooster/releases/latest/download/EchoBooster.exe"
             temp_exe = os.path.join(os.environ.get("TEMP", "C:\\"), "EchoBooster_new.exe")
             urllib.request.urlretrieve(exe_url, temp_exe)
             
