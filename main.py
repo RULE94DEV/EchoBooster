@@ -22,13 +22,22 @@ import json
 import os
 
 CUSTOM_GAMES = set()
-CONFIG_PATH = "config.json"
+_appdata = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "EchoBooster")
+os.makedirs(_appdata, exist_ok=True)
+CONFIG_PATH = os.path.join(_appdata, "config.json")
 try:
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r") as f:
             CUSTOM_GAMES = set(json.load(f).get("custom_games", []))
 except Exception:
     pass
+
+def save_custom_games():
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            json.dump({"custom_games": list(CUSTOM_GAMES)}, f)
+    except Exception:
+        pass
 
 # ── Safety whitelist ──────────────────────────────────────────────
 PROTECTED = {
@@ -218,46 +227,47 @@ RESTORE_RESTART_REG = [
 
 def restore_fps_tweaks(log_fn):
     import subprocess
+    CF = 0x08000000  # CREATE_NO_WINDOW
     log_fn("  [Restoring Instant Tweaks]")
     for path, name, typ, val in RESTORE_INSTANT_REG:
-        r = subprocess.run(f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f', shell=True, capture_output=True)
+        r = subprocess.run(f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f', shell=True, capture_output=True, creationflags=CF)
         log_fn(f"  {'OK' if r.returncode == 0 else 'SKIP'} {name}")
         
     # Revert Power Plan
-    r = subprocess.run("powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e", shell=True, capture_output=True)
+    r = subprocess.run("powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e", shell=True, capture_output=True, creationflags=CF)
     log_fn(f"  {'OK' if r.returncode == 0 else 'SKIP'} Balanced power plan")
 
     # Revert Services
     for svc_name, svc_label in [("SysMain", "Superfetch"), ("DiagTrack", "Telemetry"), ("WSearch", "Windows Search")]:
-        rc1 = subprocess.run(f"sc config {svc_name} start= delayed-auto", shell=True, capture_output=True)
+        rc1 = subprocess.run(f"sc config {svc_name} start= delayed-auto", shell=True, capture_output=True, creationflags=CF)
         if rc1.returncode != 0:
-            rc1 = subprocess.run(f"sc config {svc_name} start= auto", shell=True, capture_output=True)
-        subprocess.run(f"sc start {svc_name}", shell=True, capture_output=True)
+            rc1 = subprocess.run(f"sc config {svc_name} start= auto", shell=True, capture_output=True, creationflags=CF)
+        subprocess.run(f"sc start {svc_name}", shell=True, capture_output=True, creationflags=CF)
         log_fn(f"  {'OK' if rc1.returncode == 0 else 'SKIP'} {svc_label} restored")
         
     # Revert TCP Ping Latency Turbo (Delete keys)
     try:
         cmd = 'powershell "Get-ChildItem HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces | ForEach-Object { Remove-ItemProperty -Path $_.PSPath -Name TcpAckFrequency -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $_.PSPath -Name TCPNoDelay -ErrorAction SilentlyContinue }"'
-        subprocess.run(cmd, shell=True, capture_output=True)
+        subprocess.run(cmd, shell=True, capture_output=True, creationflags=CF)
         log_fn("  OK  TCP Ping & Latency defaults restored")
     except Exception:
         pass
         
     # Revert BCDEDIT
     try:
-        subprocess.run("bcdedit /set disabledynamictick no", shell=True, capture_output=True)
+        subprocess.run("bcdedit /set disabledynamictick no", shell=True, capture_output=True, creationflags=CF)
         log_fn("  OK  BCDEDIT Dynamic Tick restored")
     except Exception:
         pass
 
     log_fn("  [Restoring Restart Tweaks]")
     for path, name, typ, val, label in RESTORE_RESTART_REG:
-        r = subprocess.run(f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f', shell=True, capture_output=True)
+        r = subprocess.run(f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f', shell=True, capture_output=True, creationflags=CF)
         log_fn(f"  {'OK' if r.returncode == 0 else 'SKIP'} {label}")
         
     # Delete GameDVR policy
     try:
-        subprocess.run('reg delete "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\GameDVR" /v AllowGameDVR /f', shell=True, capture_output=True)
+        subprocess.run('reg delete "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\GameDVR" /v AllowGameDVR /f', shell=True, capture_output=True, creationflags=CF)
     except Exception:
         pass
 
@@ -369,44 +379,44 @@ RESTART_REG = [
 
 def apply_fps_tweaks(log_fn):
     restart_needed = False
+    CF = 0x08000000  # CREATE_NO_WINDOW
 
     log_fn("  [Instant tweaks — active now]")
     for path, name, typ, val in INSTANT_REG:
         r = subprocess.run(
             f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f',
-            shell=True, capture_output=True)
+            shell=True, capture_output=True, creationflags=CF)
         log_fn(f"  {'OK' if r.returncode == 0 else 'SKIP'} {name}")
 
     # Power plan — instant
     r = subprocess.run(
         "powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
-        shell=True, capture_output=True)
+        shell=True, capture_output=True, creationflags=CF)
     log_fn(f"  {'OK' if r.returncode == 0 else 'SKIP'} High Performance power plan")
 
     # Stop services — instant
     for svc_name, svc_label in [("SysMain", "Superfetch"), ("DiagTrack", "Telemetry"), ("WSearch", "Windows Search")]:
-        rc1 = subprocess.run(f"sc config {svc_name} start= disabled", shell=True, capture_output=True)
-        subprocess.run(f"sc stop {svc_name}", shell=True, capture_output=True)
-        # rc1 tells us if we had permission; rc2 non-zero just means already stopped (fine)
+        rc1 = subprocess.run(f"sc config {svc_name} start= disabled", shell=True, capture_output=True, creationflags=CF)
+        subprocess.run(f"sc stop {svc_name}", shell=True, capture_output=True, creationflags=CF)
         ok = rc1.returncode == 0
         log_fn(f"  {'OK' if ok else 'SKIP'} {svc_label} {'stopped' if ok else '(need admin)'}")
 
     # DNS flush — instant
-    rd = subprocess.run("ipconfig /flushdns", shell=True, capture_output=True)
+    rd = subprocess.run("ipconfig /flushdns", shell=True, capture_output=True, creationflags=CF)
     log_fn(f"  {'OK' if rd.returncode == 0 else 'SKIP'} DNS cache flushed")
 
     # TCP Ping & Latency Turbo
     try:
         cmd = 'powershell "Get-ChildItem HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces | ForEach-Object { Set-ItemProperty -Path $_.PSPath -Name TcpAckFrequency -Value 1 -Type DWord -ErrorAction SilentlyContinue; Set-ItemProperty -Path $_.PSPath -Name TCPNoDelay -Value 1 -Type DWord -ErrorAction SilentlyContinue }"'
-        subprocess.run(cmd, shell=True, capture_output=True)
+        subprocess.run(cmd, shell=True, capture_output=True, creationflags=CF)
         log_fn("  OK  TCP Ping & Latency Turbo enabled")
     except Exception:
         pass
 
-    # BCDEDIT Micro-Stutter Fix (Disable Dynamic Tick & HPET)
+    # BCDEDIT Micro-Stutter Fix
     try:
-        subprocess.run("bcdedit /set disabledynamictick yes", shell=True, capture_output=True)
-        subprocess.run("bcdedit /set useplatformclock false", shell=True, capture_output=True)
+        subprocess.run("bcdedit /set disabledynamictick yes", shell=True, capture_output=True, creationflags=CF)
+        subprocess.run("bcdedit /set useplatformclock false", shell=True, capture_output=True, creationflags=CF)
         log_fn("  OK  BCDEDIT Timer Micro-Stutter Fix applied")
     except Exception:
         pass
@@ -420,14 +430,14 @@ def apply_fps_tweaks(log_fn):
 
     if is_admin():
         subprocess.run("rundll32.exe advapi32.dll,ProcessIdleTasks",
-                       shell=True, capture_output=True)
+                       shell=True, capture_output=True, creationflags=CF)
         log_fn("  OK  Idle tasks purged")
 
     log_fn("  [Restart-required tweaks — saved, apply on next boot]")
     for path, name, typ, val, label in RESTART_REG:
         r = subprocess.run(
             f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f',
-            shell=True, capture_output=True)
+            shell=True, capture_output=True, creationflags=CF)
         if r.returncode == 0:
             log_fn(f"  OK  {label}  [RESTART NEEDED]")
             restart_needed = True
@@ -437,7 +447,7 @@ def apply_fps_tweaks(log_fn):
     return restart_needed
 
 def trim_ram():
-    """Flushes working set of all non-protected processes to free physical RAM instantly."""
+    """Flushes working set of background processes to free RAM, avoiding games and critical processes to prevent stutters."""
     trimmed = 0
     try:
         OpenProcess = ctypes.windll.kernel32.OpenProcess
@@ -445,11 +455,21 @@ def trim_ram():
         EmptyWorkingSet = ctypes.windll.psapi.EmptyWorkingSet
         PROCESS_SET_QUOTA = 0x0100
         PROCESS_VM_READ    = 0x0010
+        
+        system_critical = {"explorer.exe", "dwm.exe", "csrss.exe", "smss.exe", "winlogon.exe", 
+                           "lsass.exe", "svchost.exe", "wininit.exe", "services.exe"}
 
-        for pid in psutil.pids():
-            if pid <= 4:
-                continue
+        for proc in psutil.process_iter(['pid', 'name']):
             try:
+                pid = proc.info['pid']
+                if pid <= 4:
+                    continue
+                name = (proc.info.get('name') or "").lower().strip()
+                
+                # Skip games, protected apps, and critical system processes to prevent frame drops
+                if not name or name in PROTECTED or name in CUSTOM_GAMES or name in system_critical:
+                    continue
+
                 h = OpenProcess(PROCESS_SET_QUOTA | PROCESS_VM_READ, False, pid)
                 if h:
                     EmptyWorkingSet(h)
@@ -502,7 +522,7 @@ def kill_bloat(log_fn):
 
 def get_temp():
     try:
-        res = subprocess.run("wmic /namespace:\\\\root\\wmi PATH MSAcpi_ThermalZoneTemperature get CurrentTemperature", shell=True, capture_output=True, text=True)
+        res = subprocess.run("wmic /namespace:\\\\root\\wmi PATH MSAcpi_ThermalZoneTemperature get CurrentTemperature", shell=True, capture_output=True, text=True, creationflags=0x08000000)
         lines = res.stdout.strip().split("\n")
         if len(lines) >= 2:
             temp_k = int(lines[1].strip())
@@ -842,7 +862,7 @@ class EchoBoosterApp(ctk.CTk):
         import subprocess
         while True:
             try:
-                res = subprocess.run("ping 8.8.8.8 -n 1 -w 1000", shell=True, capture_output=True, text=True)
+                res = subprocess.run("ping 8.8.8.8 -n 1 -w 1000", shell=True, capture_output=True, text=True, creationflags=0x08000000)
                 if "time=" in res.stdout:
                     ms = res.stdout.split("time=")[1].split("ms")[0].strip()
                     self._ping_val = f"{ms}ms"
@@ -1212,11 +1232,11 @@ del "%~f0"
         if path:
             exe_name = path.split("/")[-1].lower()
             if exe_name not in CUSTOM_GAMES:
-                CUSTOM_GAMES.append(exe_name)
+                CUSTOM_GAMES.add(exe_name)
                 save_custom_games()
                 self.custom_games_lbl.configure(text=f"{len(CUSTOM_GAMES)} Games Added")
                 if exe_name not in PROTECTED:
-                    PROTECTED.append(exe_name)
+                    PROTECTED.add(exe_name)
                 self.log(f"\u2795 Added Custom Game: {exe_name}")
 
     def _do_restore(self):
@@ -1580,7 +1600,7 @@ del "%~f0"
     def _get_startup(self):
         import subprocess
         try:
-            res = subprocess.run('schtasks /query /tn "EchoBooster"', shell=True, capture_output=True, text=True)
+            res = subprocess.run('schtasks /query /tn "EchoBooster"', shell=True, capture_output=True, text=True, creationflags=0x08000000)
             return "EchoBooster" in res.stdout
         except Exception:
             return False
@@ -1599,10 +1619,10 @@ del "%~f0"
                     pass
                 
                 cmd = f'schtasks /create /f /tn "EchoBooster" /tr "\\"{sys.executable}\\" --minimized" /sc onlogon /rl highest'
-                subprocess.run(cmd, shell=True, capture_output=True)
+                subprocess.run(cmd, shell=True, capture_output=True, creationflags=0x08000000)
                 self.log("OK  Startup enabled — runs at Windows login (Admin, Hidden)")
             else:
-                subprocess.run('schtasks /delete /f /tn "EchoBooster"', shell=True, capture_output=True)
+                subprocess.run('schtasks /delete /f /tn "EchoBooster"', shell=True, capture_output=True, creationflags=0x08000000)
                 self.log("OK  Startup disabled")
         except Exception as e:
             self.log(f"ERR Startup change failed: {e}")
@@ -1879,7 +1899,7 @@ del "%~f0"
         self.log(f"System Profile: {'WEAK' if is_weak else 'STRONG'} (RAM: {ram_gb:.1f}GB, Cores: {cores})")
         
         for path, name, typ, val in INSTANT_REG:
-            subprocess.run(f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f', shell=True, capture_output=True)
+            subprocess.run(f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f', shell=True, capture_output=True, creationflags=0x08000000)
         self.log("Base registry optimizations applied")
         self._sp(0.4)
         
@@ -1910,7 +1930,7 @@ del "%~f0"
         freed = 0
         # Delivery Optimization cache
         try:
-            r = subprocess.run("cleanmgr /sagerun:1", shell=True, capture_output=True, timeout=30)
+            r = subprocess.run("cleanmgr /sagerun:1", shell=True, capture_output=True, timeout=30, creationflags=0x08000000)
         except Exception:
             pass
         # Windows Update logs
@@ -1931,7 +1951,7 @@ del "%~f0"
         # Recycle Bin
         try:
             subprocess.run("PowerShell -Command Clear-RecycleBin -Force -ErrorAction SilentlyContinue",
-                           shell=True, capture_output=True)
+                           shell=True, capture_output=True, creationflags=0x08000000)
             self.log("  Recycle Bin emptied")
         except Exception: pass
         self._sp(0.7)
@@ -2049,5 +2069,5 @@ if __name__ == "__main__":
             pass
     app = EchoBoosterApp()
     if "--minimized" in sys.argv:
-        app.after(100, lambda: app._tray_bar._on_minimize(None))
+        app.after(100, lambda: app._minimize_to_tray())
     app.mainloop()
