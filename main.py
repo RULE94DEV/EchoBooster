@@ -16,7 +16,7 @@ from tkinter import messagebox
 from avatar_const import AVATAR_B64
 
 CURRENT_VERSION = "1.0.0"
-UPDATE_URL = "https://raw.githubusercontent.com/DevRULE/EchoBooster-Updates/main/version.txt"
+UPDATE_URL = "https://raw.githubusercontent.com/RULE94DEV/EchoBooster/main/version.txt"
 
 import json
 import os
@@ -318,14 +318,38 @@ def set_dns_preset(preset_key: str, log_fn):
         else:
             ps_cmd = f'Get-NetAdapter | Where-Object {{$_.Status -eq "Up"}} | Set-DnsClientServerAddress -ServerAddresses ("{p1}","{p2}")'
         
-        r = subprocess.run(f'powershell -Command "{ps_cmd}"', shell=True, capture_output=True)
-        subprocess.run("ipconfig /flushdns", shell=True, capture_output=True)
+        r = subprocess.run(f'powershell -Command "{ps_cmd}"', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run("ipconfig /flushdns", shell=True, capture_output=True, creationflags=0x08000000)
         if r.returncode == 0:
             log_fn(f"  OK  DNS Switched to {label}")
         else:
             log_fn(f"  SKIP DNS Switch to {label} (Need Admin)")
     except Exception:
         log_fn(f"  SKIP DNS Switch error")
+
+def auto_optimize_ping(log_fn):
+    log_fn("  [Network Ping Optimizer started]")
+    best_dns = None
+    best_ping = 9999
+    
+    for key, (p1, p2, label) in DNS_PRESETS.items():
+        if key == "Reset": continue
+        try:
+            res = subprocess.run(f"ping {p1} -n 1 -w 1000", shell=True, capture_output=True, text=True, creationflags=0x08000000)
+            if "time=" in res.stdout:
+                ms = int(res.stdout.split("time=")[1].split("ms")[0].strip())
+                log_fn(f"  Ping {label}: {ms}ms")
+                if ms < best_ping:
+                    best_ping = ms
+                    best_dns = key
+        except:
+            pass
+            
+    if best_dns:
+        log_fn(f"  \u26a1 Best DNS found: {best_dns} ({best_ping}ms)")
+        set_dns_preset(best_dns, log_fn)
+    else:
+        log_fn("  \u26a0\uFE0F Could not determine best DNS. Connection issue?")
 
 # ── Tweaks: need restart to take full effect ───────────────────────
 RESTART_REG = [
@@ -739,6 +763,60 @@ class MiniTrayBar(tk.Toplevel):
         except Exception:
             pass
 
+# ═══════════════════════════════════════════════════════════════════
+#  MINI WIDGET OVERLAY (Floating in-game stats)
+# ═══════════════════════════════════════════════════════════════════
+class MiniWidgetOverlay(tk.Toplevel):
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.wm_overrideredirect(True)
+        self.wm_attributes("-topmost", True)
+        self.wm_attributes("-toolwindow", True)
+        # Make the window background transparent (requires Windows)
+        self.wm_attributes("-transparentcolor", "black")
+        self.configure(bg="black")
+        
+        sw = self.winfo_screenwidth()
+        w, h = 160, 60
+        x = sw - w - 20
+        y = 20
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        
+        self.frame = tk.Frame(self, bg=CARD, highlightbackground=ACCENT, highlightthickness=1)
+        self.frame.pack(fill="both", expand=True, padx=4, pady=4)
+        
+        self.lbl = tk.Label(self.frame, text="CPU: --% | RAM: --G\nPing: --ms",
+                            font=("Segoe UI", 9, "bold"), fg=TEXT, bg=CARD, justify="left")
+        self.lbl.pack(padx=4, pady=4)
+        
+        for w_item in (self, self.frame, self.lbl):
+            w_item.bind("<ButtonPress-1>", self.start_move)
+            w_item.bind("<ButtonRelease-1>", self.stop_move)
+            w_item.bind("<B1-Motion>", self.do_move)
+        
+        # Double click to Instant Boost
+        self.bind("<Double-Button-1>", lambda _: self.app._do_smart_tune())
+        self.withdraw()
+
+    def start_move(self, event):
+        self.x = event.x
+        self.y = event.y
+
+    def stop_move(self, event):
+        self.x = None
+        self.y = None
+
+    def do_move(self, event):
+        if self.x is None or self.y is None: return
+        deltax = event.x - self.x
+        deltay = event.y - self.y
+        self.geometry(f"+{self.winfo_x()+deltax}+{self.winfo_y()+deltay}")
+
+    def update_stats(self, cpu, ram, ping):
+        try:
+            self.lbl.configure(text=f"CPU: {cpu:.0f}% | RAM: {ram:.1f}G\nPing: {ping}")
+        except: pass
 
 # ═══════════════════════════════════════════════════════════════════
 #  MAIN APP
@@ -755,6 +833,7 @@ class EchoBoosterApp(ctk.CTk):
         self._ping_val = "N/A"
         self._build()
         self._tray_bar = MiniTrayBar(self)
+        self._mini_widget = MiniWidgetOverlay(self)
         self._stat_loop()
         threading.Thread(target=self._ping_loop_thread, daemon=True).start()
         threading.Thread(target=self._check_update, daemon=True).start()
@@ -779,14 +858,37 @@ class EchoBoosterApp(ctk.CTk):
             with urllib.request.urlopen(req, timeout=5) as response:
                 latest_version = response.read().decode('utf-8').strip()
             if latest_version and latest_version != CURRENT_VERSION:
-                self.after(0, lambda: self._show_update_required(latest_version))
+                self.after(0, lambda: self._apply_update(latest_version))
         except Exception as e:
             self.log(f"Update check failed: {e}")
 
-    def _show_update_required(self, latest):
-        messagebox.showerror("Update Required", f"A new version ({latest}) is available.\nPlease download the latest update to continue using Echo Booster.")
-        self._force_exit()
-
+    def _apply_update(self, latest):
+        self.log(f"  \u2934\uFE0F Update found ({latest}). Downloading silently...")
+        try:
+            # Assuming GitHub release direct download URL
+            exe_url = "https://github.com/RULE94DEV/EchoBooster/raw/main/EchoBooster.exe"
+            temp_exe = os.path.join(os.environ.get("TEMP", "C:\\"), "EchoBooster_new.exe")
+            urllib.request.urlretrieve(exe_url, temp_exe)
+            
+            bat_path = os.path.join(os.environ.get("TEMP", "C:\\"), "updater.bat")
+            current_exe = sys.executable
+            
+            # Batch script: Wait for app to close, overwrite old exe, start new exe, delete self.
+            bat_content = f"""@echo off
+timeout /t 2 /nobreak >nul
+move /Y "{temp_exe}" "{current_exe}"
+start "" "{current_exe}"
+del "%~f0"
+"""
+            with open(bat_path, "w") as f:
+                f.write(bat_content)
+                
+            self.log("  \u2705 Update downloaded. Restarting app to apply...")
+            subprocess.Popen(bat_path, creationflags=0x08000000)
+            self.after(500, self._force_exit)
+        except Exception as e:
+            self.log(f"  \u26a0\uFE0F Silent update failed: {e}")
+            self.after(0, lambda: messagebox.showerror("Update Required", f"A new version ({latest}) is available.\nPlease download the latest update to continue."))
 
     def _center(self):
         self.update_idletasks()
@@ -880,6 +982,7 @@ class EchoBoosterApp(ctk.CTk):
         for page_id, icon, label in [
             ("general",  "\U0001F3AE", "General"),
             ("settings", "\u2699\uFE0F",  "Settings"),
+            ("this_pc",  "\U0001F4BB", "This PC"),
             ("info",     "\u2139\uFE0F",   "Info"),
         ]:
             btn = ctk.CTkButton(
@@ -901,6 +1004,7 @@ class EchoBoosterApp(ctk.CTk):
         self._pages = {
             "general":  self._build_general_page(self._content_area),
             "settings": self._build_settings_page(self._content_area),
+            "this_pc":  self._build_this_pc_page(self._content_area),
             "info":     self._build_info_page(self._content_area),
         }
         self._active_page = None
@@ -922,8 +1026,7 @@ class EchoBoosterApp(ctk.CTk):
 
         # Left panel
         left = ctk.CTkFrame(frame, fg_color="transparent", width=300)
-        left.pack(side="left", fill="y", padx=(0, 10))
-        left.pack_propagate(False)
+        left.pack(side="left", fill="both", padx=(0, 10))
 
         # Stats
         sf = ctk.CTkFrame(left, fg_color=CARD, corner_radius=16,
@@ -947,9 +1050,15 @@ class EchoBoosterApp(ctk.CTk):
             "Total active processes.\n"
             "Kill Bloat terminates unnecessary ones\n"
             "freeing CPU and RAM instantly.")
+        self.net_d_c = StatCard(g, "Download", "\u2B07\uFE0F", "Network Download",
+            "Current real-time download speed.")
+        self.net_u_c = StatCard(g, "Upload", "\u2B06\uFE0F", "Network Upload",
+            "Current real-time upload speed.")
         self.cpu_c.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
         self.ram_c.grid(row=0, column=1, padx=4, pady=4, sticky="nsew")
         self.prc_c.grid(row=0, column=2, padx=4, pady=4, sticky="nsew")
+        self.net_d_c.grid(row=1, column=0, padx=4, pady=4, sticky="nsew")
+        self.net_u_c.grid(row=1, column=1, padx=4, pady=4, sticky="nsew")
         g.columnconfigure((0, 1, 2), weight=1)
 
         self.freed_lbl = ctk.CTkLabel(sf, text="Ready to boost",
@@ -969,14 +1078,18 @@ class EchoBoosterApp(ctk.CTk):
                      text_color=DIM).pack(padx=16, pady=(12, 8), anchor="w")
 
         BUTTONS = [
-            ("   Clean Cache", self._do_clean, ACCENT, "Clean Cache",
+            ("   Clean Cache",  self._do_clean,      ACCENT,  "Clean Cache",
              "Removes temp files. 100% safe. Effect: INSTANT."),
-            ("   Boost FPS",   self._do_fps,   CYAN,   "Boost FPS",
+            ("   Disk Clean",   self._do_disk,       WARN,    "Disk Cleaner",
+             "Frees disk space: WinSxS logs, Delivery Opt, Recycle Bin."),
+            ("   Boost FPS",    self._do_fps,        CYAN,    "Boost FPS",
              "Applies FPS tweaks. See overview for full list."),
-            ("   Kill Bloat",  self._do_kill,  PURPLE2, "Kill Bloat",
+            ("   Kill Bloat",   self._do_kill,       PURPLE2, "Kill Bloat",
              "Kills background bloat. Discord & Steam always safe."),
-            ("  FULL BOOST",   self._do_all,   DANGER, "Full Boost",
+            ("  FULL BOOST",    self._do_all,        DANGER,  "Full Boost",
              "Runs all 3 actions. Maximum performance one click."),
+            (" \u26a1 Smart Tune",  self._do_smart_tune, SUCCESS, "Smart Tune",
+             "Analyzes your hardware and applies optimal settings."),
         ]
         self._btns = []
         for txt, fn, col, tt, tb in BUTTONS:
@@ -1144,6 +1257,47 @@ class EchoBoosterApp(ctk.CTk):
                       progress_color=ACCENT,
                       command=self._toggle_startup).pack(side="right", padx=14, pady=10)
 
+        # Game Mode & Auto Boost card
+        gmc = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=16, border_color=BORDER, border_width=1)
+        gmc.pack(fill="x", padx=20, pady=(0, 12))
+        ctk.CTkLabel(gmc, text="Gaming Features", font=("Segoe UI", 13, "bold"), text_color=DIM).pack(padx=14, pady=(14, 4), anchor="w")
+        
+        mw_row = ctk.CTkFrame(gmc, fg_color=CARD2, corner_radius=10)
+        mw_row.pack(fill="x", padx=14, pady=3)
+        ctk.CTkLabel(mw_row, text="\U0001F4F1  Mini-Widget Overlay (In-Game)", font=("Segoe UI", 11, "bold"), text_color=TEXT).pack(side="left", padx=14, pady=10)
+        self._mini_widget_var = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(mw_row, text="", variable=self._mini_widget_var, onvalue=True, offvalue=False,
+                      progress_color=CYAN, command=self._toggle_mini_widget).pack(side="right", padx=14, pady=10)
+
+        gm_row = ctk.CTkFrame(gmc, fg_color=CARD2, corner_radius=10)
+        gm_row.pack(fill="x", padx=14, pady=3)
+        ctk.CTkLabel(gm_row, text="\U0001F3AE  Windows Game Mode", font=("Segoe UI", 11, "bold"), text_color=TEXT).pack(side="left", padx=14, pady=10)
+        self._gamemode_var = ctk.BooleanVar(value=self._get_gamemode())
+        ctk.CTkSwitch(gm_row, text="", variable=self._gamemode_var, onvalue=True, offvalue=False,
+                      progress_color=SUCCESS, command=self._toggle_gamemode).pack(side="right", padx=14, pady=10)
+        
+        ab_row = ctk.CTkFrame(gmc, fg_color=CARD2, corner_radius=10)
+        ab_row.pack(fill="x", padx=14, pady=3)
+        ctk.CTkLabel(ab_row, text="\u26a1  Auto Boost on Game Launch", font=("Segoe UI", 11, "bold"), text_color=TEXT).pack(side="left", padx=14, pady=10)
+        self._autoboost_var = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(ab_row, text="", variable=self._autoboost_var, onvalue=True, offvalue=False,
+                      progress_color=ACCENT).pack(side="right", padx=14, pady=10)
+        ctk.CTkFrame(gmc, height=6, fg_color="transparent").pack()
+
+        # Startup Manager card
+        stm_c = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=16, border_color=BORDER, border_width=1)
+        stm_c.pack(fill="x", padx=20, pady=(0, 12))
+        ctk.CTkLabel(stm_c, text="Startup Manager", font=("Segoe UI", 13, "bold"), text_color=DIM).pack(padx=14, pady=(14, 4), anchor="w")
+        ctk.CTkLabel(stm_c, text="Disable heavy apps that slow your boot and background.", font=("Segoe UI", 10), text_color=SUBTEXT).pack(padx=14, pady=(0, 8), anchor="w")
+        
+        self._startup_list_frame = ctk.CTkFrame(stm_c, fg_color="transparent")
+        self._startup_list_frame.pack(fill="x", padx=14, pady=(0, 14))
+        self._refresh_startup_list()
+        
+        ctk.CTkButton(stm_c, text="\U0001F504 Refresh", width=90, height=26, fg_color=CARD2, hover_color=BORDER,
+                      text_color=DIM, font=("Segoe UI", 9, "bold"), corner_radius=8,
+                      command=self._refresh_startup_list).pack(anchor="w", padx=14, pady=(0, 14))
+
         # Performance card
         pc = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=16,
                           border_color=BORDER, border_width=1)
@@ -1178,11 +1332,65 @@ class EchoBoosterApp(ctk.CTk):
         rc = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=16, border_color=BORDER, border_width=1)
         rc.pack(fill="x", padx=20, pady=(0, 12))
         ctk.CTkLabel(rc, text="Backup & Restore", font=("Segoe UI", 13, "bold"), text_color=DIM).pack(padx=14, pady=(14, 4), anchor="w")
-        ctk.CTkLabel(rc, text="Revert all registry and service changes back to Windows defaults.", font=("Segoe UI", 10), text_color=SUBTEXT).pack(padx=14, pady=(0, 10), anchor="w")
+        ctk.CTkLabel(rc, text="Revert changes or create a system restore point for safety.", font=("Segoe UI", 10), text_color=SUBTEXT).pack(padx=14, pady=(0, 10), anchor="w")
         
         r_row = ctk.CTkFrame(rc, fg_color=CARD2, corner_radius=10)
         r_row.pack(fill="x", padx=14, pady=(0, 14))
-        ctk.CTkButton(r_row, text="\U0001F504 Restore Defaults", width=140, height=32, fg_color=DANGER, hover_color=dk(DANGER), text_color=TEXT, font=("Segoe UI", 11, "bold"), command=self._do_restore).pack(side="left", padx=14, pady=10)
+        ctk.CTkButton(r_row, text="\U0001F6E1\uFE0F Create Restore Point", width=140, height=32, fg_color=CYAN, hover_color=dk(CYAN), text_color=BG, font=("Segoe UI", 11, "bold"), command=self._do_restore_point).pack(side="left", padx=14, pady=10)
+        ctk.CTkButton(r_row, text="\U0001F504 Restore Defaults", width=130, height=32, fg_color=DANGER, hover_color=dk(DANGER), text_color=TEXT, font=("Segoe UI", 10, "bold"), command=self._do_restore).pack(side="right", padx=14, pady=10)
+
+        return frame
+
+    def _build_this_pc_page(self, parent):
+        frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+
+        ctk.CTkLabel(frame, text="\U0001F4BB  This PC",
+                     font=("Segoe UI", 20, "bold"),
+                     text_color=TEXT).pack(anchor="w", padx=20, pady=(20, 16))
+
+        # Specs card
+        bc = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=16, border_color=BORDER, border_width=1)
+        bc.pack(fill="x", padx=20, pady=(0, 12))
+        
+        ctk.CTkLabel(bc, text="Hardware Specifications", font=("Segoe UI", 13, "bold"), text_color=DIM).pack(padx=14, pady=(14, 6), anchor="w")
+
+        import platform
+        try:
+            cpu_name = platform.processor() or "Unknown"
+        except: cpu_name = "Unknown"
+        
+        try:
+            gpu_raw = subprocess.run(
+                ["powershell", "-Command",
+                 "Get-WmiObject Win32_VideoController | Select-Object -First 1 -ExpandProperty Name"],
+                capture_output=True, text=True, creationflags=0x08000000, timeout=8
+            ).stdout.strip()
+            gpu_name = gpu_raw if gpu_raw else "Unknown"
+        except: gpu_name = "Unknown"
+
+        try:
+            ram_gb = round(psutil.virtual_memory().total / (1024**3))
+        except: ram_gb = 0
+            
+        try:
+            os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
+        except: os_info = "Unknown"
+
+        specs = [
+            ("Processor", cpu_name, "\U0001F9E0"),
+            ("Graphics", gpu_name, "\U0001F3AE"),
+            ("Memory (RAM)", f"{ram_gb} GB", "\U0001F4BE"),
+            ("System", os_info, "\U0001F5A5\uFE0F")
+        ]
+        
+        for label, val, icon in specs:
+            r = ctk.CTkFrame(bc, fg_color=CARD2, corner_radius=10)
+            r.pack(fill="x", padx=14, pady=3)
+            ctk.CTkLabel(r, text=f"{icon}  {label}", font=("Segoe UI", 11, "bold"), text_color=TEXT).pack(side="left", padx=14, pady=10)
+            ctk.CTkLabel(r, text=val, font=("Segoe UI", 11), text_color=CYAN).pack(side="right", padx=14, pady=10)
+        
+        ctk.CTkFrame(bc, height=10, fg_color="transparent").pack()
+
 
         return frame
 
@@ -1242,6 +1450,19 @@ class EchoBoosterApp(ctk.CTk):
                       corner_radius=10,
                       command=self._open_discord).pack(side="right", padx=14, pady=8)
 
+        # Theme Selector
+        tc = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=16, border_color=BORDER, border_width=1)
+        tc.pack(fill="x", padx=20, pady=(0, 12))
+        ctk.CTkLabel(tc, text="Theme / ألوان البرنامج", font=("Segoe UI", 13, "bold"), text_color=DIM).pack(padx=14, pady=(14, 6), anchor="w")
+        
+        t_row = ctk.CTkFrame(tc, fg_color=CARD2, corner_radius=10)
+        t_row.pack(fill="x", padx=14, pady=(0, 14))
+        
+        ctk.CTkLabel(t_row, text="🎨", font=("Segoe UI", 14)).pack(side="left", padx=14, pady=10)
+        self.theme_var = ctk.StringVar(value="Dark Blue (Default)")
+        theme_menu = ctk.CTkOptionMenu(t_row, variable=self.theme_var, values=["Dark Blue (Default)", "Blood Red", "Hacker Green", "Cyber Purple"], fg_color=BG, command=self.change_theme)
+        theme_menu.pack(side="right", padx=14, pady=10)
+
         # Protected
         nc = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=16,
                           border_color=BORDER, border_width=1)
@@ -1258,6 +1479,48 @@ class EchoBoosterApp(ctk.CTk):
         return frame
 
     # ── Helpers ───────────────────────────────────────────────────
+    def change_theme(self, theme_name):
+        global BG, CARD, CARD2, BORDER, TEXT, DIM, SUBTEXT, ACCENT, CYAN, SUCCESS, WARN, DANGER, PURPLE2
+        old_bg, old_card, old_card2, old_accent, old_cyan = BG, CARD, CARD2, ACCENT, CYAN
+        
+        if theme_name == "Blood Red":
+            BG, CARD, CARD2, BORDER, ACCENT, CYAN = "#1a0505", "#240a0a", "#301010", "#401515", "#b51717", "#ff3333"
+        elif theme_name == "Hacker Green":
+            BG, CARD, CARD2, BORDER, ACCENT, CYAN = "#050f05", "#0a170a", "#102010", "#153015", "#17b517", "#33ff33"
+        elif theme_name == "Cyber Purple":
+            BG, CARD, CARD2, BORDER, ACCENT, CYAN = "#13051a", "#1a0a24", "#251030", "#301540", "#e017b5", "#ff33f1"
+        else:
+            BG, CARD, CARD2, BORDER, ACCENT, CYAN = "#080810", "#0E0E1A", "#141422", "#1E1E35", "#7C3AED", "#06B6D4"
+            
+        self.configure(fg_color=BG)
+        
+        def update_widget(w):
+            try:
+                if hasattr(w, 'cget'):
+                    fg = w.cget("fg_color")
+                    if isinstance(fg, str):
+                        if fg.lower() == old_bg.lower(): w.configure(fg_color=BG)
+                        elif fg.lower() == old_card.lower(): w.configure(fg_color=CARD)
+                        elif fg.lower() == old_card2.lower(): w.configure(fg_color=CARD2)
+                        elif fg.lower() == old_accent.lower(): w.configure(fg_color=ACCENT)
+                        
+                    if hasattr(w, 'configure'):
+                        if "text_color" in w.keys():
+                            tc = w.cget("text_color")
+                            if isinstance(tc, str) and tc.lower() == old_cyan.lower(): w.configure(text_color=CYAN)
+                        if "progress_color" in w.keys():
+                            pc = w.cget("progress_color")
+                            if isinstance(pc, str) and pc.lower() == old_accent.lower(): w.configure(progress_color=ACCENT)
+                        if "hover_color" in w.keys():
+                            hc = w.cget("hover_color")
+                            if isinstance(hc, str) and hc.lower() == dk(old_accent).lower(): w.configure(hover_color=dk(ACCENT))
+            except Exception:
+                pass
+            for child in w.winfo_children():
+                update_widget(child)
+                
+        update_widget(self)
+
     def log(self, msg: str):
         ts = time.strftime("%H:%M:%S")
         def _w():
@@ -1355,6 +1618,87 @@ class EchoBoosterApp(ctk.CTk):
     def _show_info(self):
         self._switch_page("info")
 
+    def _toggle_mini_widget(self):
+        if self._mini_widget_var.get():
+            self._mini_widget.deiconify()
+        else:
+            self._mini_widget.withdraw()
+
+    def _get_gamemode(self):
+        try:
+            import winreg
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\GameBar")
+            val, _ = winreg.QueryValueEx(k, "AllowAutoGameMode")
+            winreg.CloseKey(k)
+            return val == 1
+        except Exception:
+            return False
+
+    def _toggle_gamemode(self):
+        try:
+            import winreg
+            val = 1 if self._gamemode_var.get() else 0
+            k = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\GameBar")
+            winreg.SetValueEx(k, "AllowAutoGameMode", 0, winreg.REG_DWORD, val)
+            winreg.SetValueEx(k, "AutoGameModeEnabled", 0, winreg.REG_DWORD, val)
+            winreg.CloseKey(k)
+            self.log(f"  {'OK' if val else 'OFF'}  Windows Game Mode {'enabled' if val else 'disabled'}")
+        except Exception as e:
+            self.log(f"  ERR Game Mode: {e}")
+
+    def _refresh_startup_list(self):
+        try:
+            for w in self._startup_list_frame.winfo_children():
+                w.destroy()
+        except Exception:
+            pass
+        try:
+            import winreg
+            entries = []
+            for hive, path in [
+                (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"),
+            ]:
+                try:
+                    k = winreg.OpenKey(hive, path)
+                    i = 0
+                    while True:
+                        try:
+                            name, val, _ = winreg.EnumValue(k, i)
+                            entries.append((hive, path, name, val))
+                            i += 1
+                        except OSError:
+                            break
+                    winreg.CloseKey(k)
+                except Exception:
+                    pass
+            if not entries:
+                ctk.CTkLabel(self._startup_list_frame, text="No startup entries found.",
+                             font=("Segoe UI", 10), text_color=SUBTEXT).pack(anchor="w")
+                return
+            for hive, path, name, val in entries[:10]:  # cap at 10
+                scope = "User" if hive == winreg.HKEY_CURRENT_USER else "System"
+                r = ctk.CTkFrame(self._startup_list_frame, fg_color=CARD2, corner_radius=8)
+                r.pack(fill="x", pady=2)
+                ctk.CTkLabel(r, text=f"[{scope}] {name}", font=("Segoe UI", 10, "bold"),
+                             text_color=TEXT, wraplength=300, justify="left").pack(side="left", padx=10, pady=6)
+                def _disable(h=hive, p=path, n=name):
+                    try:
+                        import winreg
+                        k = winreg.OpenKey(h, p, 0, winreg.KEY_WRITE)
+                        winreg.DeleteValue(k, n)
+                        winreg.CloseKey(k)
+                        self.log(f"  OK  Startup disabled: {n}")
+                        self._refresh_startup_list()
+                    except Exception as e:
+                        self.log(f"  ERR {e}")
+                ctk.CTkButton(r, text="Disable", width=70, height=24,
+                              fg_color=DANGER, hover_color=dk(DANGER),
+                              text_color=TEXT, font=("Segoe UI", 9, "bold"),
+                              corner_radius=6, command=_disable).pack(side="right", padx=8, pady=6)
+        except Exception as e:
+            self.log(f"  ERR Startup Manager: {e}")
+
     def _force_exit(self):
         """Terminates and exits Echo Booster completely."""
         try:
@@ -1373,7 +1717,11 @@ class EchoBoosterApp(ctk.CTk):
 
     # ── Stat loop & Smart AI Daemon ───────────────────────────────
     def _stat_loop(self):
+        _prev_net = psutil.net_io_counters()
+        _prev_time = time.time()
+        _battery_active = False
         def loop():
+            nonlocal _prev_net, _prev_time, _battery_active
             last_boosted_game = None
             while True:
                 try:
@@ -1381,6 +1729,43 @@ class EchoBoosterApp(ctk.CTk):
                     self.after(0, lambda c=cpu:                    self.cpu_c.set(f"{c:.0f}%"))
                     self.after(0, lambda ru=ram_used, rt=ram_total: self.ram_c.set(f"{ru:.1f}G"))
                     self.after(0, lambda p=pr:                     self.prc_c.set(str(p)))
+
+                    # Mini-Widget Update
+                    self.after(0, lambda c=cpu, r=ram_used, p=self._ping_val: self._mini_widget.update_stats(c, r, p))
+
+                    # Advanced Battery Saver (Laptop Mode)
+                    try:
+                        battery = psutil.sensors_battery()
+                        if battery:
+                            if not battery.power_plugged and not _battery_active:
+                                # Switch to power saver
+                                subprocess.run("powercfg /setactive a1841308-3541-4fab-bc81-f71556f20b4a", shell=True, capture_output=True, creationflags=0x08000000)
+                                self.log("  \U0001F50B Battery Mode Detected: Power Saver Activated")
+                                _battery_active = True
+                            elif battery.power_plugged and _battery_active:
+                                # Switch to High Performance
+                                subprocess.run("powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", shell=True, capture_output=True, creationflags=0x08000000)
+                                self.log("  \u26a1 Plugged In: High Performance Activated")
+                                _battery_active = False
+                    except Exception:
+                        pass
+
+
+                    # Network speed
+                    try:
+                        cur_net = psutil.net_io_counters()
+                        cur_time = time.time()
+                        dt = max(cur_time - _prev_time, 0.1)
+                        dl = (cur_net.bytes_recv - _prev_net.bytes_recv) / dt / 1024
+                        ul = (cur_net.bytes_sent - _prev_net.bytes_sent) / dt / 1024
+                        _prev_net = cur_net
+                        _prev_time = cur_time
+                        dl_str = f"{dl:.0f} KB/s" if dl < 1024 else f"{dl/1024:.1f} MB/s"
+                        ul_str = f"{ul:.0f} KB/s" if ul < 1024 else f"{ul/1024:.1f} MB/s"
+                        self.after(0, lambda d=dl_str: self.net_d_c.set(d))
+                        self.after(0, lambda u=ul_str: self.net_u_c.set(u))
+                    except Exception:
+                        pass
 
                     # Smart AI Game Detection
                     game_title, game_proc = detect_active_game()
@@ -1392,7 +1777,13 @@ class EchoBoosterApp(ctk.CTk):
                             except Exception:
                                 pass
                             trim_ram()
-                            self.log(f"⚡ Smart AI: Detected {game_title} — Priority boosted to HIGH & RAM trimmed!")
+                            self.log(f"\u26a1 Smart AI: Detected {game_title} \u2014 Priority boosted to HIGH & RAM trimmed!")
+                            # Auto Boost on Game Launch
+                            try:
+                                if hasattr(self, '_autoboost_var') and self._autoboost_var.get():
+                                    self._run(self._t_smart)
+                            except Exception:
+                                pass
                         def _set_active(gt=game_title, c=cpu, r=ram_used, t=temp):
                             try:
                                 self.game_badge.configure(
@@ -1433,6 +1824,8 @@ class EchoBoosterApp(ctk.CTk):
     def _do_fps(self):   self._run(self._t_fps)
     def _do_kill(self):  self._run(self._t_kill)
     def _do_all(self):   self._run(self._t_all)
+    def _do_smart_tune(self): self._run(self._t_smart)
+    def _do_disk(self):  self._run(self._t_disk)
 
     def _do_dns(self, key):
         def _t():
@@ -1442,18 +1835,150 @@ class EchoBoosterApp(ctk.CTk):
             self._ss("DNS Updated")
             self._lock(False)
         self._run(_t)
-    def _do_fps(self):   self._run(self._t_fps)
-    def _do_kill(self):  self._run(self._t_kill)
-    def _do_all(self):   self._run(self._t_all)
+
+    def _do_auto_ping(self):
+        def _t():
+            self._lock(True)
+            self._ss("Optimizing Ping...")
+            auto_optimize_ping(self.log)
+            self._ss("Ping Optimized")
+            self._lock(False)
+        self._run(_t)
+
+    def _do_restore_point(self):
+        def _t():
+            self._lock(True)
+            self._ss("Creating Restore Point...")
+            self.log("=== System Restore ===")
+            self.log("  Creating a system restore point (This may take a minute)...")
+            try:
+                cmd = 'powershell.exe -Command "Checkpoint-Computer -Description \'EchoBooster Backup\' -RestorePointType \'MODIFY_SETTINGS\'"'
+                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, creationflags=0x08000000)
+                if res.returncode == 0:
+                    self.log("  \u2705 Restore Point created successfully.")
+                    self._ss("Restore Point Created")
+                else:
+                    self.log(f"  \u26a0\uFE0F Failed. Is System Restore enabled? {res.stderr}")
+                    self._ss("Failed to create")
+            except Exception as e:
+                self.log(f"  \u26a0\uFE0F Error: {e}")
+                self._ss("Error")
+            self._lock(False)
+        self._run(_t)
+
+    def _t_smart(self):
+        self._lock(True); self._ss("Smart Tuning..."); self._sp(0.1)
+        self.log("=== Smart AI Tuning Started ===")
+        try:
+            ram_gb = psutil.virtual_memory().total / (1024**3)
+            cores = psutil.cpu_count(logical=False) or 2
+        except Exception:
+            ram_gb = 4; cores = 2
+        
+        is_weak = ram_gb < 8 or cores < 4
+        self.log(f"System Profile: {'WEAK' if is_weak else 'STRONG'} (RAM: {ram_gb:.1f}GB, Cores: {cores})")
+        
+        for path, name, typ, val in INSTANT_REG:
+            subprocess.run(f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f', shell=True, capture_output=True)
+        self.log("Base registry optimizations applied")
+        self._sp(0.4)
+        
+        freed = clean_cache(self.log)
+        self.log(f"Cache cleared: {freed / 1024**2:.1f} MB freed")
+        self._sp(0.6)
+        
+        if is_weak:
+            self.log("Lightweight Mode Active: Safely skipped aggressive tasks that may cause freezing on low-end hardware.")
+            self._sr("")
+        else:
+            self.log("Performance Mode Active: Applying heavy GPU/CPU scheduling optimizations.")
+            for path, name, typ, val, label in RESTART_REG:
+                subprocess.run(f'reg add "{path}" /v "{name}" /t {typ} /d {val} /f', shell=True, capture_output=True)
+            self._sr("Restart recommended for advanced tweaks")
+            
+        trim_ram()
+        self.log("RAM Trimmed")
+        
+        self._sp(1.0)
+        self._sf("Smart Tuning Complete")
+        self._ss("Done")
+        self._sp0_delayed()
+        self._lock(False)
+    def _t_disk(self):
+        self._lock(True); self._ss("Disk Cleaning..."); self._sp(0.1)
+        self.log("=== Disk Cleaner ===")
+        freed = 0
+        # Delivery Optimization cache
+        try:
+            r = subprocess.run("cleanmgr /sagerun:1", shell=True, capture_output=True, timeout=30)
+        except Exception:
+            pass
+        # Windows Update logs
+        do_path = Path(os.environ.get("SystemRoot", "C:\\Windows")) / "SoftwareDistribution" / "Download"
+        try:
+            for item in do_path.iterdir():
+                try:
+                    if item.is_file():
+                        sz = item.stat().st_size; item.unlink(); freed += sz
+                    elif item.is_dir():
+                        try: sz = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                        except: sz = 0
+                        shutil.rmtree(item, ignore_errors=True); freed += sz
+                except (PermissionError, OSError): pass
+        except Exception: pass
+        self.log(f"  Windows Update cache cleaned")
+        self._sp(0.4)
+        # Recycle Bin
+        try:
+            subprocess.run("PowerShell -Command Clear-RecycleBin -Force -ErrorAction SilentlyContinue",
+                           shell=True, capture_output=True)
+            self.log("  Recycle Bin emptied")
+        except Exception: pass
+        self._sp(0.7)
+        # Delivery Optimization
+        do2 = Path(os.environ.get("SystemRoot", "C:\\Windows")) / "ServiceProfiles" / "NetworkService" / "AppData" / "Local" / "Microsoft" / "Windows" / "DeliveryOptimization" / "Cache"
+        try:
+            for item in do2.iterdir():
+                try:
+                    shutil.rmtree(item, ignore_errors=True) if item.is_dir() else item.unlink()
+                except: pass
+        except Exception: pass
+        self._sp(0.9)
+        # Regular cache on top
+        freed += clean_cache(self.log)
+        self._sp(1.0)
+        mb = freed / 1024**2
+        self.log(f"Disk Clean Done: {mb:.1f} MB freed")
+        self._sf(f"Disk: {mb:.1f} MB freed")
+        self._ss("Done")
+        self._sp0_delayed()
+        self._lock(False)
+
+    def _compute_score(self, cpu, ram_used, ram_total, ping_ms):
+        """0-100 performance score. Higher = better."""
+        try:
+            cpu_score  = max(0, 100 - cpu)
+            ram_free   = ram_total - ram_used
+            ram_score  = min(100, (ram_free / ram_total) * 100)
+            try: p = int(str(ping_ms).replace("ms", "").strip())
+            except: p = 50
+            ping_score = max(0, 100 - p)
+            return int((cpu_score * 0.4) + (ram_score * 0.35) + (ping_score * 0.25))
+        except Exception:
+            return 0
 
     def _t_clean(self):
+        cpu_b, ram_b, rt_b, _, _ = get_stats()
         self._lock(True); self._ss("Cleaning..."); self._sp(0.1)
         self.log("=== Cache Clean ===")
         freed = clean_cache(self.log)
         mb = freed / 1024**2
         self._sp(1.0)
         self.log(f"Done: {mb:.1f} MB freed")
-        self._sf(f"Freed: {mb:.1f} MB")
+        cpu_a, ram_a, _, _, _ = get_stats()
+        s_b = self._compute_score(cpu_b, ram_b, rt_b, self._ping_val)
+        s_a = self._compute_score(cpu_a, ram_a, rt_b, self._ping_val)
+        self._sf(f"Freed: {mb:.1f} MB  |  Score: {s_b}\u2192{s_a}/100")
         self._ss("Done")
         self._sp0_delayed()
         self._lock(False)
