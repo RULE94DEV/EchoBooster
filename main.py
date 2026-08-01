@@ -4,22 +4,33 @@ Echo Booster - System Optimizer
 Dev: Dev RULE
 """
 
-import customtkinter as ctk
-import psutil, os, shutil, threading, subprocess
-import ctypes, sys, time, base64, io
+import ctypes
+import os
+import sys
+import json
+import shutil
+import threading
+import subprocess
+import time
 import tkinter as tk
-from pathlib import Path
-from PIL import Image, ImageDraw
-import urllib.request
 from tkinter import messagebox
+from pathlib import Path
+import psutil
+from PIL import Image, ImageDraw
+import pystray
+import customtkinter as ctk
+
+if sys.platform == "win32":
+    # Hide console window programmatically — avoids PyInstaller --noconsole DLL bug on Python 3.14
+    _hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+    if _hwnd:
+        ctypes.windll.user32.ShowWindow(_hwnd, 0)
 
 from avatar_const import AVATAR_B64
 
 CURRENT_VERSION = "1.0.0"
 UPDATE_URL = "https://raw.githubusercontent.com/RULE94DEV/EchoBooster/main/version.txt"
 
-import json
-import os
 
 CUSTOM_GAMES = set()
 _appdata = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "EchoBooster")
@@ -874,6 +885,7 @@ class EchoBoosterApp(ctk.CTk):
 
     def _check_update(self):
         try:
+            import urllib.request
             req = urllib.request.Request(UPDATE_URL, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=5) as response:
                 latest_version = response.read().decode('utf-8').strip()
@@ -885,22 +897,26 @@ class EchoBoosterApp(ctk.CTk):
     def _apply_update(self, latest):
         self.log(f"  \u2934\uFE0F Update found ({latest}). Downloading silently...")
         try:
-            # Use GitHub Releases latest download URL
-            exe_url = "https://github.com/RULE94DEV/EchoBooster/releases/latest/download/EchoBooster.exe"
-            temp_exe = os.path.join(os.environ.get("TEMP", "C:\\"), "EchoBooster_new.exe")
-            urllib.request.urlretrieve(exe_url, temp_exe)
+            import urllib.request
+            # Point to the zip release file
+            zip_url = "https://github.com/RULE94DEV/EchoBooster/releases/latest/download/EchoBooster_Release.zip"
+            temp_zip = os.path.join(os.environ.get("TEMP", "C:\\"), "EchoBooster_update.zip")
+            temp_extract = os.path.join(os.environ.get("TEMP", "C:\\"), "EchoBooster_extracted")
             
-            bat_path = os.path.join(os.environ.get("TEMP", "C:\\"), "updater.bat")
+            urllib.request.urlretrieve(zip_url, temp_zip)
+            
             current_exe = sys.executable
+            app_dir = os.path.dirname(current_exe)
+            bat_path = os.path.join(os.environ.get("TEMP", "C:\\"), "updater.bat")
             
-            # Batch script: Wait for app to close, overwrite old exe, start new exe, delete self.
+            # Batch script: Wait, use PowerShell to unzip and overwrite app directory, restart app, delete self
             bat_content = f"""@echo off
 timeout /t 2 /nobreak >nul
-move /Y "{temp_exe}" "{current_exe}"
+powershell -NoProfile -Command "Expand-Archive -Path '{temp_zip}' -DestinationPath '{temp_extract}' -Force; Copy-Item -Path '{temp_extract}\\EchoBooster\\*' -Destination '{app_dir}' -Recurse -Force; Remove-Item -Path '{temp_extract}' -Recurse -Force; Remove-Item -Path '{temp_zip}' -Force"
 start "" "{current_exe}"
 del "%~f0"
 """
-            with open(bat_path, "w") as f:
+            with open(bat_path, "w", encoding="utf-8") as f:
                 f.write(bat_content)
                 
             self.log("  \u2705 Update downloaded. Restarting app to apply...")
