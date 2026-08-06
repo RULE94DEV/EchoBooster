@@ -1315,7 +1315,7 @@ del "%~f0"
         ab_row = ctk.CTkFrame(gmc, fg_color=CARD2, corner_radius=10)
         ab_row.pack(fill="x", padx=14, pady=3)
         ctk.CTkLabel(ab_row, text="\u26a1  Auto Boost on Game Launch", font=("Segoe UI", 11, "bold"), text_color=TEXT).pack(side="left", padx=14, pady=10)
-        self._autoboost_var = ctk.BooleanVar(value=True)
+        self._autoboost_var = ctk.BooleanVar(value=False)
         ctk.CTkSwitch(ab_row, text="", variable=self._autoboost_var, onvalue=True, offvalue=False,
                       progress_color=ACCENT).pack(side="right", padx=14, pady=10)
         ctk.CTkFrame(gmc, height=6, fg_color="transparent").pack()
@@ -1817,7 +1817,9 @@ del "%~f0"
                             # Auto Boost on Game Launch
                             try:
                                 if hasattr(self, '_autoboost_var') and self._autoboost_var.get():
-                                    self._run(self._t_smart)
+                                    if not getattr(self, '_smart_tuned_once', False):
+                                        self._smart_tuned_once = True
+                                        self._run(self._t_smart)
                             except Exception:
                                 pass
                         def _set_active(gt=game_title, c=cpu, r=ram_used, t=temp):
